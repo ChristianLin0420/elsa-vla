@@ -53,3 +53,6 @@ checkpoints/
 
 # TOML files
 *.toml
+
+# slurm
+slurm_job.sh

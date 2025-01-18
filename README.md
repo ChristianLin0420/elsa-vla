@@ -1,24 +1,11 @@
-# OpenVLA: An Open-Source Vision-Language-Action Model
+# ElsaVLA: A Vision-Language-Action Model
 
-[![arXiv](https://img.shields.io/badge/arXiv-2406.09246-df2a2a.svg?style=for-the-badge)](https://arxiv.org/abs/2406.09246)
-[![HF Models](https://img.shields.io/badge/%F0%9F%A4%97-Models-yellow?style=for-the-badge)](https://huggingface.co/openvla/openvla-7b)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.2.0-EE4C2C.svg?style=for-the-badge&logo=pytorch)](https://pytorch.org/get-started/locally/)
 [![Python](https://img.shields.io/badge/python-3.10-blue?style=for-the-badge)](https://www.python.org)
 [![License](https://img.shields.io/github/license/TRI-ML/prismatic-vlms?style=for-the-badge)](LICENSE)
  
-[**Getting Started**](#getting-started) | [**Pretrained VLAs**](#pretrained-vlas) | [**Installation**](#installation) | [**Fine-Tuning OpenVLA via LoRA**](#fine-tuning-openvla-via-lora) | [**Fully Fine-Tuning OpenVLA**](#fully-fine-tuning-openvla) |
-[**Training VLAs from Scratch**](#training-vlas-from-scratch) | [**Evaluating OpenVLA**](#evaluating-openvla) | [**Project Website**](https://openvla.github.io/)
-
-
-<hr style="border: 2px solid gray;"></hr>
-
-## Latest Updates
-- [2024-10-15] Added a [VLA Performance Troubleshooting](#vla-performance-troubleshooting) section to the README with best practices for debugging poor VLA performance after fine-tuning.
-- [2024-09-04] Added LIBERO simulation benchmark fine-tuning experiments to paper (see v2 on [arXiv](https://arxiv.org/abs/2406.09246));
-  added instructions for reproducing OpenVLA results in [LIBERO Simulation Benchmark Evaluations](#libero-simulation-benchmark-evaluations) section
-- [2024-08-14] Added new section, [Evaluating OpenVLA](#evaluating-openvla), with instructions for running BridgeData V2 WidowX robot evals
-- [2024-07-08] Added new sections: [Fine-Tuning OpenVLA via LoRA](#fine-tuning-openvla-via-lora), [Fully Fine-Tuning OpenVLA](#fully-fine-tuning-openvla)
-- [2024-06-13] Initial release
+[**Getting Started**](#getting-started) | [**Installation**](#installation) | [**Fine-Tuning via LoRA**](#fine-tuning-via-lora) | [**Fully Fine-Tuning**](#fully-fine-tuning) |
+[**Training from Scratch**](#training-from-scratch) | [**Evaluation**](#evaluation)
 
 <hr style="border: 2px solid gray;"></hr>
 
@@ -80,26 +67,6 @@ For deployment, we provide a lightweight script for [serving OpenVLA models over
 providing an easy way to integrate OpenVLA models into existing robot control stacks, 
 removing any requirement for powerful on-device compute.
 
-## Pretrained VLAs
-
-We release two OpenVLA models trained as part of our work, with checkpoints, configs, and model cards available [on our
-HuggingFace page](https://huggingface.co/openvla):
-- [`openvla-7b`](https://huggingface.co/openvla/openvla-7b): The flagship model from our paper, trained from 
-  the Prismatic `prism-dinosiglip-224px` VLM (based on a fused DINOv2 and SigLIP vision backbone, and Llama-2 LLM). 
-  Trained on a large mixture of datasets from Open X-Embodiment spanning 970K trajectories 
-  ([mixture details - see "Open-X Magic Soup++"](./prismatic/vla/datasets/rlds/oxe/mixtures.py)).
-- [`openvla-v01-7b`](https://huggingface.co/openvla/openvla-7b-v01): An early model used during development, trained from
-  the Prismatic `siglip-224px` VLM (singular SigLIP vision backbone, and a Vicuña v1.5 LLM). Trained on the same mixture
-  of datasets as [Octo](https://github.com/octo-models/octo), but for significantly fewer GPU hours than our final model 
-  ([mixture details - see "Open-X Magic Soup"](./prismatic/vla/datasets/rlds/oxe/mixtures.py)).
-
-**Explicit Notes on Model Licensing & Commercial Use**: While all code in this repository is released under an MIT 
-License, our pretrained models may inherit restrictions from the underlying base models we use. Specifically, both the
-above models are derived from Llama-2, and as such are subject to the 
-[Llama Community License](https://ai.meta.com/llama/license/).
-
----
-
 ## Installation
 
 > **Note**: These installation instructions are for full-scale pretraining (and distributed fine-tuning); if looking to
@@ -146,12 +113,12 @@ visually-conditioned language models; while you can use this repo to train VLMs 
 language (via `scripts/generate.py`) with existing OpenVLA models will not work (as we only train current OpenVLA models
 to generate actions, and actions alone).
 
-## Fine-Tuning OpenVLA via LoRA
+## Fine-Tuning via LoRA
 
 In this section, we discuss fine-tuning OpenVLA using Low-Rank Adaptation (LoRA) via the Hugging Face `transformers` library,
 which is recommended if you do not have sufficient compute to fully fine-tune a 7B-parameter model. The main script for LoRA
 fine-tuning is `vla-scripts/finetune.py`. (If you instead wish to do full fine-tuning, please see the
-[Fully Fine-Tuning OpenVLA](#fully-fine-tuning-openvla) section.)
+[Fully Fine-Tuning](#fully-fine-tuning) section.)
 
 Below we show an example of how you can fine-tune the main OpenVLA checkpoint ([`openvla-7b`](https://huggingface.co/openvla/openvla-7b))
 via LoRA. Here we fine-tune on [BridgeData V2](https://rail-berkeley.github.io/bridgedata/) using a single A100
@@ -211,13 +178,13 @@ Once you have integrated your new dataset, you can launch LoRA fine-tuning with 
 please visit the [VLA Troubleshooting](#vla-troubleshooting) section or search for a similar issue in the [OpenVLA GitHub Issues page](https://github.com/openvla/openvla/issues?q=)
 (including "Closed" issues). If you cannot find a similar issue there, feel free to create a new issue.
 
-## Fully Fine-Tuning OpenVLA
+## Fully Fine-Tuning
 
 In this section, we discuss <ins>fully fine-tuning</ins> OpenVLA (all 7.5 billion parameters) via native PyTorch Fully Sharded Data Parallel (FSDP)
 using the [Prismatic VLMs](https://github.com/TRI-ML/prismatic-vlms) training script. Full fine-tuning is more advanced/involved and is only recommended
 if you have sufficient compute (e.g., a full node of 8 A100 GPUs) and if LoRA fine-tuning is insufficient for your use case (e.g., if the fine-tuning distribution
 varies drastically from the pretraining distribution). Otherwise, we recommend that you try parameter-efficient fine-tuning via LoRA, which is described in the 
-[Fine-Tuning OpenVLA via LoRA](#fine-tuning-openvla-via-lora) section.
+[Fine-Tuning via LoRA](#fine-tuning-via-lora) section.
 
 For full fine-tuning, you will need to download [a different version of the OpenVLA model checkpoint](https://huggingface.co/openvla/openvla-7b-prismatic) that is compatible
 with the Prismatic VLMs codebase, which we built on top of to develop the OpenVLA model. You can download this Prismatic-compatible OpenVLA checkpoint using the git commands below
@@ -376,7 +343,7 @@ vla = AutoModelForVision2Seq.from_pretrained(
 ...
 ```
 
-## Training VLAs from Scratch
+## Training from Scratch
 
 We provide full instructions and configurations for training VLA models on (arbitrary subsets of) the
 [Open X-Embodiment (OXE) Dataset](https://robotics-transformer-x.github.io/). If you run in to any issues with 
@@ -429,7 +396,7 @@ AttributeError: 'DLataset' object has no attribute 'traj_map'. Did you mean: 'fl
 
 ---
 
-## Evaluating OpenVLA
+## Evaluation
 
 ### BridgeData V2 WidowX Evaluations
 
@@ -592,7 +559,7 @@ High-level overview of repository/project file-tree:
 
 + `prismatic` - Package source; provides core utilities for model loading, training, data preprocessing, etc.
 + `vla-scripts/` - Core scripts for training, fine-tuning, and deploying VLAs.
-+ `experiments/` - Code for evaluating OpenVLA policies in robot environments.
++ `experiments/` - Code for evaluating VLA policies in robot environments.
 + `LICENSE` - All code is made available under the MIT License; happy hacking!
 + `Makefile` - Top-level Makefile (by default, supports linting - checking & auto-fix); extend as needed.
 + `pyproject.toml` - Full project configuration details (including dependencies), as well as tool configurations.
@@ -600,12 +567,11 @@ High-level overview of repository/project file-tree:
 
 ---
 
-
 # VLA Performance Troubleshooting
 
 In this section we cover best practices for debugging poor VLA performance after fine-tuning on your target domain robot dataset.
 
-**Note**: OpenVLA typically requires fine-tuning on a small demonstration dataset (~100 demos) from your target domain robot. Out-of-the-box, it only works well on domains from the training dataset.
+**Note**: The model typically requires fine-tuning on a small demonstration dataset (~100 demos) from your target domain robot. Out-of-the-box, it only works well on domains from the training dataset.
 
 **Sanity checks**:
 - replay the actions from a demonstration from your fine-tuning dataset and make sure that the robot can execute the task successfully (this ensures that your data collection pipeline is correct)
@@ -613,23 +579,9 @@ In this section we cover best practices for debugging poor VLA performance after
 
 **Best practices for fine-tuning data collection**:
 If your setup passed the above two sanity checks, the issue may not be in model training, but in the data you fine-tuned the model with. Some best practices for data collection:
-- *Collect at a control frequency around 5-10Hz.* OpenVLA is not trained with action chunking, empirically the model struggles with high-frequency data. If your robot setup uses a high-frequency controller (eg 50 Hz), consider downsampling your actions to 5Hz. Verify first that your robot can still solve the task when using 5Hz actions (ie repeat sanity check (1) above with 5Hz actions)
-- *Avoid pauses / small actions during data collection.* Because OpenVLA is trained without action chunking, the model can be sensitive to idle actions in the fine-tuning data. If your data contains steps in which the robot barely moves, the model may "get stuck" in these steps at inference time. Try to collect fine-tuning demonstrations with continuous, slow movement.
+- *Collect at a control frequency around 5-10Hz.* The model is not trained with action chunking, empirically it struggles with high-frequency data. If your robot setup uses a high-frequency controller (eg 50 Hz), consider downsampling your actions to 5Hz. Verify first that your robot can still solve the task when using 5Hz actions (ie repeat sanity check (1) above with 5Hz actions)
+- *Avoid pauses / small actions during data collection.* Because the model is trained without action chunking, it can be sensitive to idle actions in the fine-tuning data. If your data contains steps in which the robot barely moves, the model may "get stuck" in these steps at inference time. Try to collect fine-tuning demonstrations with continuous, slow movement.
 - *Ensure sufficient data coverage.* If you plan to test the model with some variation, e.g. different initial positions of objects, make sure that your fine-tuning data contains sufficient diversity of such conditions as well, e.g. shows demonstrations with diverse initial conditions.
 - *Use consistent task strategies during data collection.* This is not a hard constraint, but may make your life easier. Try to demonstrate tasks in consistent ways, e.g. approach objects from the same side, perform sub-steps in the same order even if they could be performed in arbitrary sequences. Being consistent gives you a less multi-modal fine-tuning dataset, which makes the modeling problem easier.
 
-
 ---
-
-#### Citation
-
-If you find our code or models useful in your work, please cite [our paper](https://arxiv.org/abs/2406.09246):
-
-```bibtex
-@article{kim24openvla,
-    title={OpenVLA: An Open-Source Vision-Language-Action Model},
-    author={{Moo Jin} Kim and Karl Pertsch and Siddharth Karamcheti and Ted Xiao and Ashwin Balakrishna and Suraj Nair and Rafael Rafailov and Ethan Foster and Grace Lam and Pannag Sanketi and Quan Vuong and Thomas Kollar and Benjamin Burchfiel and Russ Tedrake and Dorsa Sadigh and Sergey Levine and Percy Liang and Chelsea Finn},
-    journal = {arXiv preprint arXiv:2406.09246},
-    year={2024}
-} 
-```
