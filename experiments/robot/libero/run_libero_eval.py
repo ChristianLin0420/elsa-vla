@@ -105,6 +105,7 @@ def eval_libero(cfg: GenerateConfig) -> None:
 
     # [OpenVLA] Check that the model contains the action un-normalization key
     if cfg.model_family == "openvla":
+        print(f"model.norm_stats: {model.norm_stats}")
         # In some cases, the key must be manually modified (e.g. after training on a modified version of the dataset
         # with the suffix "_no_noops" in the dataset name)
         if cfg.unnorm_key not in model.norm_stats and f"{cfg.unnorm_key}_no_noops" in model.norm_stats:

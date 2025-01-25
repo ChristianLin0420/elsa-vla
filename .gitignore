@@ -50,9 +50,16 @@ Thumbs.db
 # Project specific
 runs/
 checkpoints/
+adapters/
 
 # TOML files
 *.toml
 
 # slurm
-slurm_job.sh
+bridge_orig_lora_finetune.sh
+
+# output files
+*.out
+*.err
+*.log
+*.txt
