@@ -1,12 +1,12 @@
 #!/bin/bash
 #SBATCH --account=MST113264                 # (-A) iService Project ID
 #SBATCH --job-name=openvla_ft               # (-J) Job name
-#SBATCH --partition=normal                  # (-p) Slurm partition for H100 nodes
+#SBATCH --partition=dev                  # (-p) Slurm partition for H100 nodes
 #SBATCH --nodes=1                           # (-N) Maximum number of nodes to be allocated
 #SBATCH --gpus-per-node=8                   # Gpus per node
 #SBATCH --cpus-per-task=12                  # (-c) Number of cores per MPI task
 #SBATCH --ntasks-per-node=8                 # Maximum number of tasks on each node
-#SBATCH --time=48:00:00                     # (-t) Wall time limit (days-hrs:min:sec)
+#SBATCH --time=2:00:00                     # (-t) Wall time limit (days-hrs:min:sec)
 #SBATCH --output=openvla-%j.out             # (-o) Path to the standard output file
 #SBATCH --error=openvla-%j.err              # (-e) Path to the standard error file
 #SBATCH --mail-type=END,FAIL                # Mail events (NONE, BEGIN, END, FAIL, ALL)
@@ -84,8 +84,8 @@ srun torchrun \
     --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT \
     vla-scripts/finetune.py \
     --vla_path "openvla/openvla-7b" \
-    --data_root_dir "/work/crlc112358/datasets/modified_libero_rlds" \
-    --dataset_name libero_object_no_noops \
+    --data_root_dir "/work/crlc112358/datasets/" \
+    --dataset_name bridge_orig \
     --run_root_dir "runs" \
     --adapter_tmp_dir "adapters" \
     --lora_rank 32 \
@@ -93,6 +93,6 @@ srun torchrun \
     --grad_accumulation_steps 1 \
     --learning_rate 5e-4 \
     --image_aug True \
-    --wandb_project "libero_object_no_noops_lora_finetune" \
+    --wandb_project "bridge_orig_lora_finetune" \
     --wandb_entity "elsa-vla" \
     --save_steps 500 
