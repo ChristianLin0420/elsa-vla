@@ -73,6 +73,20 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 # # fmt: on
 
 
+# Add critic network class after imports and before FinetuneConfig
+class CriticNetwork(torch.nn.Module):
+    def __init__(self, hidden_size):
+        super().__init__()
+        self.value_head = torch.nn.Sequential(
+            torch.nn.Linear(hidden_size, hidden_size),
+            torch.nn.ReLU(),
+            torch.nn.Linear(hidden_size, 1)
+        )
+    
+    def forward(self, hidden_states):
+        return self.value_head(hidden_states).squeeze(-1)
+
+
 @dataclass
 class FinetuneConfig:
     # fmt: off
@@ -109,6 +123,12 @@ class FinetuneConfig:
     wandb_project: str = "openvla"                                  # Name of W&B project to log to (use default!)
     wandb_entity: str = "stanford-voltron"                          # Name of entity to log under
     run_id_note: Optional[str] = None                               # Extra note for logging, Weights & Biases
+
+    # PPO Parameters
+    critic_learning_rate: float = 1e-4                              # Learning rate for critic network
+    value_loss_coef: float = 0.5                                   # Coefficient for value loss
+    clip_param: float = 0.2                                        # PPO clip parameter
+    entropy_coef: float = 0.01                                     # Entropy bonus coefficient
 
     # fmt: on
 
@@ -191,7 +211,13 @@ def finetune(cfg: FinetuneConfig) -> None:
     # Wrap VLA in PyTorch DDP Wrapper for Multi-GPU Training
     vla = DDP(vla, device_ids=[device_id], find_unused_parameters=True, gradient_as_bucket_view=True)
 
-    # Initialize old policy for PPO
+    # Initialize critic network for PPO
+    critic = CriticNetwork(vla.module.config.hidden_size).to(device_id)
+    if distributed_state.is_world_size > 1:
+        critic = DDP(critic, device_ids=[device_id])
+    critic_optimizer = AdamW(critic.parameters(), lr=cfg.critic_learning_rate)
+
+    # Initialize old policy and critic for PPO
     old_vla = copy.deepcopy(vla.module)
     old_vla.eval()
     old_vla = old_vla.to(device_id)
@@ -260,6 +286,7 @@ def finetune(cfg: FinetuneConfig) -> None:
     recent_rewards = deque(maxlen=cfg.grad_accumulation_steps)
     recent_entropies = deque(maxlen=cfg.grad_accumulation_steps)
     recent_ppo_losses = deque(maxlen=cfg.grad_accumulation_steps)
+    recent_value_losses = deque(maxlen=cfg.grad_accumulation_steps)
 
     # Train!
     with tqdm.tqdm(total=cfg.max_steps, leave=False) as progress:
@@ -288,10 +315,10 @@ def finetune(cfg: FinetuneConfig) -> None:
                 new_log_probs = torch.log_softmax(action_logits, dim=-1).gather(dim=2, index=action_preds.unsqueeze(-1)).squeeze(-1)
                 new_log_prob = new_log_probs.sum(dim=1)  # sum over sequence length
 
-                # Periodically update old policy for PPO (every 50 steps)
+                # Periodically update old policy and critic for PPO
                 if batch_idx % cfg.ppo_update_interval == 0:
                     if distributed_state.is_main_process:
-                        print(f"Updating old policy at step {batch_idx}")
+                        print(f"Updating old policy and critic at step {batch_idx}")
                     old_vla.load_state_dict(vla.module.state_dict())
                     old_vla.eval()
 
@@ -311,39 +338,48 @@ def finetune(cfg: FinetuneConfig) -> None:
                 action_gt = batch["labels"][:, 1:].to(action_preds.device)
                 mask = action_gt > action_tokenizer.action_token_begin_idx
 
-                # Compute continuous actions using the action tokenizer (for reward signal)
+                # Get hidden states for value estimation
+                hidden_states = output.hidden_states[-1][:, 0]  # Use CLS token hidden state
+                values = critic(hidden_states)
+
+                # Compute continuous actions and reward as before
                 continuous_actions_pred = torch.tensor(action_tokenizer.decode_token_ids_to_actions(action_preds[mask].cpu().numpy()))
                 continuous_actions_gt = torch.tensor(action_tokenizer.decode_token_ids_to_actions(action_gt[mask].cpu().numpy()))
                 l1_loss_val = torch.nn.functional.l1_loss(continuous_actions_pred, continuous_actions_gt)
 
-                # Define reward as negative L1 loss so that lower L1 gives higher reward
+                # Define reward and compute advantages
                 reward = -l1_loss_val
-                advantage = reward  # simple advantage (in practice, use a value baseline)
+                advantages = reward - values.detach()
 
                 # PPO clipped objective
-                clip_param = 0.2
                 ratio = torch.exp(new_log_prob - old_log_prob)
-                surrogate1 = ratio * advantage
-                surrogate2 = torch.clamp(ratio, 1.0 - clip_param, 1.0 + clip_param) * advantage
-                ppo_loss = -torch.min(surrogate1, surrogate2).mean()
+                surrogate1 = ratio * advantages
+                surrogate2 = torch.clamp(ratio, 1.0 - cfg.clip_param, 1.0 + cfg.clip_param) * advantages
+                policy_loss = -torch.min(surrogate1, surrogate2).mean()
 
-                # Entropy bonus to encourage exploration
+                # Value loss
+                value_loss = (values - reward).pow(2).mean()
+
+                # Entropy bonus
                 entropy = -(torch.softmax(action_logits, dim=-1) * torch.log_softmax(action_logits, dim=-1)).sum(dim=-1).mean()
-                entropy_coef = 0.01
-                total_loss = ppo_loss - entropy_coef * entropy
+                
+                # Total loss
+                total_loss = (
+                    policy_loss 
+                    + cfg.value_loss_coef * value_loss 
+                    - cfg.entropy_coef * entropy
+                )
 
-                # Normalize loss to account for gradient accumulation
-                normalized_loss = total_loss / cfg.grad_accumulation_steps
-
-                # Optionally, update metric deques
+                # Update metric deques
                 recent_losses.append(total_loss.item())
                 recent_action_accuracies.append(action_accuracy.item())
                 recent_rewards.append(reward.item())
                 recent_entropies.append(entropy.item())
-                recent_ppo_losses.append(ppo_loss.item())
+                recent_ppo_losses.append(policy_loss.item())
+                recent_value_losses.append(value_loss.item())
 
             # Backward pass
-            normalized_loss.backward()
+            total_loss.backward()
 
             # Compute smoothened train metrics
             #   =>> Equal to current step metrics when not using gradient accumulation
@@ -353,6 +389,7 @@ def finetune(cfg: FinetuneConfig) -> None:
             smoothened_reward = sum(recent_rewards) / len(recent_rewards)
             smoothened_entropy = sum(recent_entropies) / len(recent_entropies)
             smoothened_ppo_loss = sum(recent_ppo_losses) / len(recent_ppo_losses)
+            smoothened_value_loss = sum(recent_value_losses) / len(recent_value_losses)
 
             # Push Metrics to W&B (every 10 gradient steps)
             if distributed_state.is_main_process and batch_idx % 10 == 0:
@@ -362,7 +399,8 @@ def finetune(cfg: FinetuneConfig) -> None:
                         "action_accuracy": smoothened_action_accuracy,
                         "reward": smoothened_reward,
                         "entropy": smoothened_entropy,
-                        "ppo_loss": smoothened_ppo_loss,
+                        "policy_loss": smoothened_ppo_loss,
+                        "value_loss": smoothened_value_loss,
                     },
                     step=batch_idx,
                 )
@@ -370,7 +408,9 @@ def finetune(cfg: FinetuneConfig) -> None:
             # Optimizer Step
             if (batch_idx + 1) % cfg.grad_accumulation_steps == 0:
                 optimizer.step()
+                critic_optimizer.step()
                 optimizer.zero_grad()
+                critic_optimizer.zero_grad()
                 progress.update()
 
             # Save Model Checkpoint =>> by default, only keeps the latest checkpoint, continually overwriting it!
