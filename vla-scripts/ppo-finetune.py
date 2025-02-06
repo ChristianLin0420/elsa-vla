@@ -24,6 +24,7 @@ from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
+import copy
 
 import draccus
 import torch
@@ -96,7 +97,9 @@ class FinetuneConfig:
                                                                     #   (If False, saves all checkpoints)
 
     # LoRA Arguments
-    use_lora: bool = True                                           # Whether to use LoRA fine-tuning
+    use_lora: bool = False                                          # Whether to use LoRA fine-tuning
+    use_ppo: bool = True                                            # Whether to use PPO fine-tuning
+    ppo_update_interval: int = 50                                   # Interval for updating old policy for PPO
     lora_rank: int = 32                                             # Rank of LoRA weight matrix
     lora_dropout: float = 0.0                                       # Dropout applied to LoRA weights
     use_quantization: bool = False                                  # Whether to 4-bit quantize VLA for LoRA fine-tuning
@@ -128,6 +131,9 @@ def finetune(cfg: FinetuneConfig) -> None:
     )
     if cfg.use_lora:
         exp_id += f"+lora-r{cfg.lora_rank}+dropout-{cfg.lora_dropout}"
+    if cfg.use_ppo:
+        exp_id += "+ppo"
+        exp_id += f"+ppo-update-{cfg.ppo_update_interval}"
     if cfg.use_quantization:
         exp_id += "+q-4bit"
     if cfg.run_id_note is not None:
@@ -184,6 +190,11 @@ def finetune(cfg: FinetuneConfig) -> None:
 
     # Wrap VLA in PyTorch DDP Wrapper for Multi-GPU Training
     vla = DDP(vla, device_ids=[device_id], find_unused_parameters=True, gradient_as_bucket_view=True)
+
+    # Initialize old policy for PPO
+    old_vla = copy.deepcopy(vla.module)
+    old_vla.eval()
+    old_vla = old_vla.to(device_id)
 
     # Create Optimizer =>> note that we default to a simple constant learning rate!
     trainable_params = [param for param in vla.parameters() if param.requires_grad]
@@ -246,7 +257,9 @@ def finetune(cfg: FinetuneConfig) -> None:
     # Deque to store recent train metrics (used for computing smoothened metrics for gradient accumulation)
     recent_losses = deque(maxlen=cfg.grad_accumulation_steps)
     recent_action_accuracies = deque(maxlen=cfg.grad_accumulation_steps)
-    recent_l1_losses = deque(maxlen=cfg.grad_accumulation_steps)
+    recent_rewards = deque(maxlen=cfg.grad_accumulation_steps)
+    recent_entropies = deque(maxlen=cfg.grad_accumulation_steps)
+    recent_ppo_losses = deque(maxlen=cfg.grad_accumulation_steps)
 
     # Train!
     with tqdm.tqdm(total=cfg.max_steps, leave=False) as progress:
@@ -260,57 +273,98 @@ def finetune(cfg: FinetuneConfig) -> None:
                     pixel_values=batch["pixel_values"].to(torch.bfloat16).to(device_id),
                     labels=batch["labels"],
                 )
-                loss = output.loss
+                # PPO update: compute PPO loss instead of standard next-token prediction loss
+                # Extract action logits (skip vision patch tokens), and get predicted action tokens
+                action_logits = output.logits[:, vla.module.vision_backbone.featurizer.patch_embed.num_patches : -1]
+                action_preds = action_logits.argmax(dim=2)
+                action_gt = batch["labels"][:, 1:].to(action_preds.device)
+                mask = action_gt > action_tokenizer.action_token_begin_idx
 
-            # Normalize loss to account for gradient accumulation
-            normalized_loss = loss / cfg.grad_accumulation_steps
+                # Compute Accuracy
+                correct_preds = (action_preds == action_gt) & mask
+                action_accuracy = correct_preds.sum().float() / mask.sum().float()
+
+                # Compute new log probabilities for the selected actions
+                new_log_probs = torch.log_softmax(action_logits, dim=-1).gather(dim=2, index=action_preds.unsqueeze(-1)).squeeze(-1)
+                new_log_prob = new_log_probs.sum(dim=1)  # sum over sequence length
+
+                # Periodically update old policy for PPO (every 50 steps)
+                if batch_idx % cfg.ppo_update_interval == 0:
+                    if distributed_state.is_main_process:
+                        print(f"Updating old policy at step {batch_idx}")
+                    old_vla.load_state_dict(vla.module.state_dict())
+                    old_vla.eval()
+
+                # Get log probs from old policy
+                with torch.no_grad():
+                    old_output = old_vla(
+                        input_ids=batch["input_ids"].to(device_id),
+                        attention_mask=batch["attention_mask"].to(device_id),
+                        pixel_values=batch["pixel_values"].to(torch.bfloat16).to(device_id),
+                        labels=batch["labels"],
+                    )
+                    old_action_logits = old_output.logits[:, vla.module.vision_backbone.featurizer.patch_embed.num_patches : -1]
+                    old_log_probs = torch.log_softmax(old_action_logits, dim=-1).gather(dim=2, index=action_preds.unsqueeze(-1)).squeeze(-1)
+                    old_log_prob = old_log_probs.sum(dim=1)
+
+                # Get ground truth actions (shifted by one token)
+                action_gt = batch["labels"][:, 1:].to(action_preds.device)
+                mask = action_gt > action_tokenizer.action_token_begin_idx
+
+                # Compute continuous actions using the action tokenizer (for reward signal)
+                continuous_actions_pred = torch.tensor(action_tokenizer.decode_token_ids_to_actions(action_preds[mask].cpu().numpy()))
+                continuous_actions_gt = torch.tensor(action_tokenizer.decode_token_ids_to_actions(action_gt[mask].cpu().numpy()))
+                l1_loss_val = torch.nn.functional.l1_loss(continuous_actions_pred, continuous_actions_gt)
+
+                # Define reward as negative L1 loss so that lower L1 gives higher reward
+                reward = -l1_loss_val
+                advantage = reward  # simple advantage (in practice, use a value baseline)
+
+                # PPO clipped objective
+                clip_param = 0.2
+                ratio = torch.exp(new_log_prob - old_log_prob)
+                surrogate1 = ratio * advantage
+                surrogate2 = torch.clamp(ratio, 1.0 - clip_param, 1.0 + clip_param) * advantage
+                ppo_loss = -torch.min(surrogate1, surrogate2).mean()
+
+                # Entropy bonus to encourage exploration
+                entropy = -(torch.softmax(action_logits, dim=-1) * torch.log_softmax(action_logits, dim=-1)).sum(dim=-1).mean()
+                entropy_coef = 0.01
+                total_loss = ppo_loss - entropy_coef * entropy
+
+                # Normalize loss to account for gradient accumulation
+                normalized_loss = total_loss / cfg.grad_accumulation_steps
+
+                # Optionally, update metric deques
+                recent_losses.append(total_loss.item())
+                recent_action_accuracies.append(action_accuracy.item())
+                recent_rewards.append(reward.item())
+                recent_entropies.append(entropy.item())
+                recent_ppo_losses.append(ppo_loss.item())
 
             # Backward pass
             normalized_loss.backward()
-
-            # Compute Accuracy and L1 Loss for Logging
-            action_logits = output.logits[:, vla.module.vision_backbone.featurizer.patch_embed.num_patches : -1]
-            action_preds = action_logits.argmax(dim=2)
-            action_gt = batch["labels"][:, 1:].to(action_preds.device)
-            mask = action_gt > action_tokenizer.action_token_begin_idx
-
-            # Compute Accuracy
-            correct_preds = (action_preds == action_gt) & mask
-            action_accuracy = correct_preds.sum().float() / mask.sum().float()
-
-            # Compute L1 Loss on Predicted (Continuous) Actions
-            continuous_actions_pred = torch.tensor(
-                action_tokenizer.decode_token_ids_to_actions(action_preds[mask].cpu().numpy())
-            )
-            continuous_actions_gt = torch.tensor(
-                action_tokenizer.decode_token_ids_to_actions(action_gt[mask].cpu().numpy())
-            )
-            action_l1_loss = torch.nn.functional.l1_loss(continuous_actions_pred, continuous_actions_gt)
-
-            # Store recent train metrics
-            recent_losses.append(loss.item())
-            recent_action_accuracies.append(action_accuracy.item())
-            recent_l1_losses.append(action_l1_loss.item())
-
-            # Compute gradient step index
-            gradient_step_idx = batch_idx // cfg.grad_accumulation_steps
 
             # Compute smoothened train metrics
             #   =>> Equal to current step metrics when not using gradient accumulation
             #   =>> Otherwise, equal to the average of metrics observed over micro-batches used for gradient accumulation
             smoothened_loss = sum(recent_losses) / len(recent_losses)
             smoothened_action_accuracy = sum(recent_action_accuracies) / len(recent_action_accuracies)
-            smoothened_l1_loss = sum(recent_l1_losses) / len(recent_l1_losses)
+            smoothened_reward = sum(recent_rewards) / len(recent_rewards)
+            smoothened_entropy = sum(recent_entropies) / len(recent_entropies)
+            smoothened_ppo_loss = sum(recent_ppo_losses) / len(recent_ppo_losses)
 
             # Push Metrics to W&B (every 10 gradient steps)
-            if distributed_state.is_main_process and gradient_step_idx % 10 == 0:
+            if distributed_state.is_main_process and batch_idx % 10 == 0:
                 wandb.log(
                     {
                         "train_loss": smoothened_loss,
                         "action_accuracy": smoothened_action_accuracy,
-                        "l1_loss": smoothened_l1_loss,
+                        "reward": smoothened_reward,
+                        "entropy": smoothened_entropy,
+                        "ppo_loss": smoothened_ppo_loss,
                     },
-                    step=gradient_step_idx,
+                    step=batch_idx,
                 )
 
             # Optimizer Step
@@ -320,9 +374,9 @@ def finetune(cfg: FinetuneConfig) -> None:
                 progress.update()
 
             # Save Model Checkpoint =>> by default, only keeps the latest checkpoint, continually overwriting it!
-            if gradient_step_idx > 0 and gradient_step_idx % cfg.save_steps == 0:
+            if batch_idx > 0 and batch_idx % cfg.save_steps == 0:
                 if distributed_state.is_main_process:
-                    print(f"Saving Model Checkpoint for Step {gradient_step_idx}")
+                    print(f"Saving Model Checkpoint for Step {batch_idx}")
 
                     # If LoRA, we first save adapter weights, then merge into full model; otherwise, default save!
                     save_dir = adapter_dir if cfg.use_lora else run_dir
@@ -347,10 +401,10 @@ def finetune(cfg: FinetuneConfig) -> None:
                             # Overwrite latest checkpoint
                             merged_vla.save_pretrained(run_dir)
 
-                            print(f"Saved Model Checkpoint for Step {gradient_step_idx} at: {run_dir}")
+                            print(f"Saved Model Checkpoint for Step {batch_idx} at: {run_dir}")
                         else:
                             # Prepare to save checkpoint in new directory
-                            checkpoint_dir = Path(str(run_dir) + f"--{gradient_step_idx}_chkpt")
+                            checkpoint_dir = Path(str(run_dir) + f"--{batch_idx}_chkpt")
                             os.makedirs(checkpoint_dir, exist_ok=True)
 
                             # Save dataset statistics to new directory
@@ -360,13 +414,13 @@ def finetune(cfg: FinetuneConfig) -> None:
                             processor.save_pretrained(checkpoint_dir)
                             merged_vla.save_pretrained(checkpoint_dir)
 
-                            print(f"Saved Model Checkpoint for Step {gradient_step_idx} at: {checkpoint_dir}")
+                            print(f"Saved Model Checkpoint for Step {batch_idx} at: {checkpoint_dir}")
 
                 # Block on Main Process Checkpointing
                 dist.barrier()
 
             # Stop training when max_steps is reached
-            if gradient_step_idx == cfg.max_steps:
+            if batch_idx == cfg.max_steps:
                 print(f"Max step {cfg.max_steps} reached! Stopping training...")
                 break
 

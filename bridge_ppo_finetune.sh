@@ -7,8 +7,8 @@
 #SBATCH --cpus-per-task=12                  # (-c) Number of cores per MPI task
 #SBATCH --ntasks-per-node=8                 # Maximum number of tasks on each node
 #SBATCH --time=48:00:00                     # (-t) Wall time limit (days-hrs:min:sec)
-#SBATCH --output=openvla-lora.out           # (-o) Path to the standard output file
-#SBATCH --error=openvla-lora.err            # (-e) Path to the standard error file
+#SBATCH --output=openvla-ppo.out            # (-o) Path to the standard output file
+#SBATCH --error=openvla-ppo.err             # (-e) Path to the standard error file
 #SBATCH --mail-type=END,FAIL                # Mail events (NONE, BEGIN, END, FAIL, ALL)
 #SBATCH --mail-user=crlc112358@gmail.com    # Where to send mail.  Set this to your email address
 
@@ -82,7 +82,7 @@ srun torchrun \
     --rdzv_id=$SLURM_JOB_ID \
     --rdzv_backend=c10d \
     --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT \
-    vla-scripts/finetune.py \
+    vla-scripts/ppo-finetune.py \
     --vla_path "openvla/openvla-7b" \
     --data_root_dir "/work/crlc112358/datasets/" \
     --dataset_name bridge_orig \

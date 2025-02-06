@@ -63,3 +63,8 @@ bridge_orig_lora_finetune.sh
 *.err
 *.log
 *.txt
+
+# test
+test_runs/
+test_adapter/
+test.sh
