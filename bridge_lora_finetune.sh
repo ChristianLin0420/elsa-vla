@@ -24,7 +24,7 @@ export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
 # Initialize conda
 source ~/.bashrc
 eval "$(conda shell.bash hook)"
-conda activate openvla
+conda activate vla-rl
 
 # Check if conda env is activated
 echo "Checking conda environment activation..."

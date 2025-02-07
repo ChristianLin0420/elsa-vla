@@ -68,3 +68,6 @@ bridge_orig_lora_finetune.sh
 test_runs/
 test_adapter/
 test.sh
+
+hub/
+modules

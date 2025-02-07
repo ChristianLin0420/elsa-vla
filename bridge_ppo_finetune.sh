@@ -1,8 +1,8 @@
 #!/bin/bash
 #SBATCH --account=MST113264                 # (-A) iService Project ID
-#SBATCH --job-name=openvla_ft               # (-J) Job name
+#SBATCH --job-name=openvla_ppo_ft           # (-J) Job name
 #SBATCH --partition=normal                  # (-p) Slurm partition for H100 nodes
-#SBATCH --nodes=1                           # (-N) Maximum number of nodes to be allocated
+#SBATCH --nodes=2                           # (-N) Maximum number of nodes to be allocated
 #SBATCH --gpus-per-node=8                   # Gpus per node
 #SBATCH --cpus-per-task=12                  # (-c) Number of cores per MPI task
 #SBATCH --ntasks-per-node=8                 # Maximum number of tasks on each node
@@ -24,7 +24,7 @@ export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
 # Initialize conda
 source ~/.bashrc
 eval "$(conda shell.bash hook)"
-conda activate openvla
+conda activate vla-rl
 
 # Check if conda env is activated
 echo "Checking conda environment activation..."
@@ -77,7 +77,7 @@ echo "RANK: $RANK"
 
 # Run the finetuning script
 srun torchrun \
-    --nnodes=1 \
+    --nnodes=2 \
     --nproc_per_node=8 \
     --rdzv_id=$SLURM_JOB_ID \
     --rdzv_backend=c10d \
@@ -90,7 +90,7 @@ srun torchrun \
     --adapter_tmp_dir "adapters" \
     --max_steps 100000 \
     --lora_rank 32 \
-    --batch_size 8 \
+    --batch_size 1 \
     --grad_accumulation_steps 1 \
     --learning_rate 5e-4 \
     --image_aug True \

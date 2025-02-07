@@ -72,19 +72,21 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 #
 # # fmt: on
 
-
-# Add critic network class after imports and before FinetuneConfig
-class CriticNetwork(torch.nn.Module):
-    def __init__(self, hidden_size):
+class QNetwork(torch.nn.Module):
+    def __init__(self, hidden_size, action_dim):
         super().__init__()
-        self.value_head = torch.nn.Sequential(
+        self.q_net = torch.nn.Sequential(
+            torch.nn.Linear(hidden_size + action_dim, hidden_size),
+            torch.nn.ReLU(),
             torch.nn.Linear(hidden_size, hidden_size),
             torch.nn.ReLU(),
             torch.nn.Linear(hidden_size, 1)
         )
     
-    def forward(self, hidden_states):
-        return self.value_head(hidden_states).squeeze(-1)
+    def forward(self, hidden_states, actions):
+        print(f"hidden_states: {hidden_states.shape}, actions: {actions.shape}")
+        x = torch.cat([hidden_states, actions], dim=-1)
+        return self.q_net(x)
 
 
 @dataclass
@@ -111,9 +113,7 @@ class FinetuneConfig:
                                                                     #   (If False, saves all checkpoints)
 
     # LoRA Arguments
-    use_lora: bool = False                                          # Whether to use LoRA fine-tuning
-    use_ppo: bool = True                                            # Whether to use PPO fine-tuning
-    ppo_update_interval: int = 50                                   # Interval for updating old policy for PPO
+    use_lora: bool = True                                           # Whether to use LoRA fine-tuning
     lora_rank: int = 32                                             # Rank of LoRA weight matrix
     lora_dropout: float = 0.0                                       # Dropout applied to LoRA weights
     use_quantization: bool = False                                  # Whether to 4-bit quantize VLA for LoRA fine-tuning
@@ -124,11 +124,16 @@ class FinetuneConfig:
     wandb_entity: str = "stanford-voltron"                          # Name of entity to log under
     run_id_note: Optional[str] = None                               # Extra note for logging, Weights & Biases
 
-    # PPO Parameters
-    critic_learning_rate: float = 1e-4                              # Learning rate for critic network
-    value_loss_coef: float = 0.5                                   # Coefficient for value loss
-    clip_param: float = 0.2                                        # PPO clip parameter
-    entropy_coef: float = 0.01                                     # Entropy bonus coefficient
+    # SAC Parameters
+    q_lr: float = 3e-4                                             # Q-network learning rate
+    alpha: float = 0.2                                             # Temperature parameter for entropy
+    gamma: float = 0.99                                            # Discount factor
+    tau: float = 0.005                                             # Soft update coefficient
+    use_sac: bool = True                                           # Whether to use SAC
+    hidden_size: int = 4096                                        # Hidden size for networks
+    action_dim: int = 7                                            # Dimension of continuous actions
+    target_update_interval: int = 1                                # How often to update target networks
+    automatic_entropy_tuning: bool = True                          # Whether to automatically tune entropy
 
     # fmt: on
 
@@ -151,9 +156,6 @@ def finetune(cfg: FinetuneConfig) -> None:
     )
     if cfg.use_lora:
         exp_id += f"+lora-r{cfg.lora_rank}+dropout-{cfg.lora_dropout}"
-    if cfg.use_ppo:
-        exp_id += "+ppo"
-        exp_id += f"+ppo-update-{cfg.ppo_update_interval}"
     if cfg.use_quantization:
         exp_id += "+q-4bit"
     if cfg.run_id_note is not None:
@@ -205,21 +207,11 @@ def finetune(cfg: FinetuneConfig) -> None:
             init_lora_weights="gaussian",
         )
         vla = get_peft_model(vla, lora_config)
-        print(f"Trainable parameters w/ LoRA: \n {vla.print_trainable_parameters()}")
+        # print(f"Trainable parameters w/ LoRA: \n {vla.print_trainable_parameters()}")
         vla.print_trainable_parameters()
 
     # Wrap VLA in PyTorch DDP Wrapper for Multi-GPU Training
     vla = DDP(vla, device_ids=[device_id], find_unused_parameters=True, gradient_as_bucket_view=True)
-
-    # Initialize critic network for PPO
-    critic = CriticNetwork(4096).to(device_id)
-    critic = DDP(critic, device_ids=[device_id])
-    critic_optimizer = AdamW(critic.parameters(), lr=cfg.critic_learning_rate)
-
-    # Initialize old policy and critic for PPO
-    old_vla = copy.deepcopy(vla.module)
-    old_vla.eval()
-    old_vla = old_vla.to(device_id)
 
     # Create Optimizer =>> note that we default to a simple constant learning rate!
     trainable_params = [param for param in vla.parameters() if param.requires_grad]
@@ -282,10 +274,39 @@ def finetune(cfg: FinetuneConfig) -> None:
     # Deque to store recent train metrics (used for computing smoothened metrics for gradient accumulation)
     recent_losses = deque(maxlen=cfg.grad_accumulation_steps)
     recent_action_accuracies = deque(maxlen=cfg.grad_accumulation_steps)
-    recent_rewards = deque(maxlen=cfg.grad_accumulation_steps)
+    recent_q_losses = deque(maxlen=cfg.grad_accumulation_steps)
+    recent_policy_losses = deque(maxlen=cfg.grad_accumulation_steps)
     recent_entropies = deque(maxlen=cfg.grad_accumulation_steps)
-    recent_ppo_losses = deque(maxlen=cfg.grad_accumulation_steps)
-    recent_value_losses = deque(maxlen=cfg.grad_accumulation_steps)
+
+    # Initialize networks for SAC
+    q_net1 = QNetwork(cfg.hidden_size, cfg.action_dim).to(device_id)
+    q_net2 = QNetwork(cfg.hidden_size, cfg.action_dim).to(device_id)
+    q_net1_target = QNetwork(cfg.hidden_size, cfg.action_dim).to(device_id)
+    q_net2_target = QNetwork(cfg.hidden_size, cfg.action_dim).to(device_id)
+
+    # Initialize target networks with same weights
+    for target_param, param in zip(q_net1_target.parameters(), q_net1.parameters()):
+        target_param.data.copy_(param.data)
+    for target_param, param in zip(q_net2_target.parameters(), q_net2.parameters()):
+        target_param.data.copy_(param.data)
+
+    q_net1 = DDP(q_net1, device_ids=[device_id])
+    q_net2 = DDP(q_net2, device_ids=[device_id])
+    q_net1_target = DDP(q_net1_target, device_ids=[device_id])
+    q_net2_target = DDP(q_net2_target, device_ids=[device_id])
+
+    # Create optimizers for SAC
+    q1_optimizer = AdamW(q_net1.parameters(), lr=cfg.q_lr)
+    q2_optimizer = AdamW(q_net2.parameters(), lr=cfg.q_lr)
+
+    # Automatic entropy tuning
+    if cfg.automatic_entropy_tuning:
+        target_entropy = -torch.prod(torch.Tensor([cfg.action_dim])).item()
+        log_alpha = torch.zeros(1, requires_grad=True, device=device_id)
+        alpha_optimizer = AdamW([log_alpha], lr=cfg.q_lr)
+        alpha = log_alpha.exp()
+    else:
+        alpha = cfg.alpha
 
     # Train!
     with tqdm.tqdm(total=cfg.max_steps, leave=False) as progress:
@@ -293,6 +314,15 @@ def finetune(cfg: FinetuneConfig) -> None:
         optimizer.zero_grad()
         for batch_idx, batch in enumerate(dataloader):
             with torch.autocast("cuda", dtype=torch.bfloat16):
+                
+                for k, v in batch.items():
+                    if isinstance(v, torch.Tensor):
+                        print(f"{k}: {v.shape}")
+                    else:
+                        print(f"{k}")
+                    if k in ["input_ids", "attention_mask", "labels"]:
+                        print(f"{k}: {v[0]}")
+
                 output: CausalLMOutputWithPast = vla(
                     input_ids=batch["input_ids"].to(device_id),
                     attention_mask=batch["attention_mask"].to(device_id),
@@ -300,9 +330,15 @@ def finetune(cfg: FinetuneConfig) -> None:
                     labels=batch["labels"],
                     output_hidden_states=True
                 )
-                # PPO update: compute PPO loss instead of standard next-token prediction loss
-                # Extract action logits (skip vision patch tokens), and get predicted action tokens
+
+                print(f"output.hidden_states: {len(list(output.hidden_states))}")
+                print(f"original hidden states shape: {output.hidden_states[-1].shape}")
+
+                # Extract hidden states and action predictions
+                hidden_states = output.hidden_states[-1][:, 0]  # Use CLS token
                 action_logits = output.logits[:, vla.module.vision_backbone.featurizer.patch_embed.num_patches : -1]
+                print(f"action_logits: {action_logits.shape}")
+                action_probs = torch.softmax(action_logits, dim=-1)
                 action_preds = action_logits.argmax(dim=2)
                 action_gt = batch["labels"][:, 1:].to(action_preds.device)
                 mask = action_gt > action_tokenizer.action_token_begin_idx
@@ -311,108 +347,92 @@ def finetune(cfg: FinetuneConfig) -> None:
                 correct_preds = (action_preds == action_gt) & mask
                 action_accuracy = correct_preds.sum().float() / mask.sum().float()
 
-                # Compute new log probabilities for the selected actions
-                new_log_probs = torch.log_softmax(action_logits, dim=-1).gather(dim=2, index=action_preds.unsqueeze(-1)).squeeze(-1)
-                new_log_prob = new_log_probs.sum(dim=1)  # sum over sequence length
-
-                # Periodically update old policy and critic for PPO
-                if batch_idx % cfg.ppo_update_interval == 0:
-                    if distributed_state.is_main_process:
-                        print(f"Updating old policy and critic at step {batch_idx}")
-                    old_vla.load_state_dict(vla.module.state_dict())
-                    old_vla.eval()
-
-                # Get log probs from old policy
-                with torch.no_grad():
-                    old_output = old_vla(
-                        input_ids=batch["input_ids"].to(device_id),
-                        attention_mask=batch["attention_mask"].to(device_id),
-                        pixel_values=batch["pixel_values"].to(torch.bfloat16).to(device_id),
-                        labels=batch["labels"],
-                    )
-                    old_action_logits = old_output.logits[:, vla.module.vision_backbone.featurizer.patch_embed.num_patches : -1]
-                    old_log_probs = torch.log_softmax(old_action_logits, dim=-1).gather(dim=2, index=action_preds.unsqueeze(-1)).squeeze(-1)
-                    old_log_prob = old_log_probs.sum(dim=1)
-
-                # Get ground truth actions (shifted by one token)
-                action_gt = batch["labels"][:, 1:].to(action_preds.device)
-                mask = action_gt > action_tokenizer.action_token_begin_idx
-
-                # Get hidden states for value estimation
-                hidden_states = output.hidden_states[-1][:, 0]  # Use CLS token hidden state
-                print(f"hidden_states: {hidden_states.shape}")
-                values = critic(hidden_states)
-
-                # Compute continuous actions and reward as before
-                continuous_actions_pred = torch.tensor(action_tokenizer.decode_token_ids_to_actions(action_preds[mask].cpu().numpy()))
-                continuous_actions_gt = torch.tensor(action_tokenizer.decode_token_ids_to_actions(action_gt[mask].cpu().numpy()))
-                l1_loss_val = torch.nn.functional.l1_loss(continuous_actions_pred, continuous_actions_gt)
-
-                # Define reward and compute advantages
-                reward = -l1_loss_val
-                advantages = reward - values.detach()
-
-                # PPO clipped objective
-                ratio = torch.exp(new_log_prob - old_log_prob)
-                surrogate1 = ratio * advantages
-                surrogate2 = torch.clamp(ratio, 1.0 - cfg.clip_param, 1.0 + cfg.clip_param) * advantages
-                policy_loss = -torch.min(surrogate1, surrogate2).mean()
-
-                # Value loss
-                value_loss = (values - reward).pow(2).mean()
-
-                # Entropy bonus
-                entropy = -(torch.softmax(action_logits, dim=-1) * torch.log_softmax(action_logits, dim=-1)).sum(dim=-1).mean()
+                print(f"action_preds: {action_preds.shape}, action_gt: {action_gt.shape}")
                 
-                # Total loss
-                total_loss = (
-                    policy_loss 
-                    + cfg.value_loss_coef * value_loss 
-                    - cfg.entropy_coef * entropy
-                )
+                # Convert discrete actions to continuous
+                continuous_actions_pred = torch.tensor(
+                    action_tokenizer.decode_token_ids_to_actions(action_preds[mask].cpu().numpy())
+                ).to(device_id)
+                continuous_actions_gt = torch.tensor(
+                    action_tokenizer.decode_token_ids_to_actions(action_gt[mask].cpu().numpy())
+                ).to(device_id)
 
-                # Update metric deques
+                print(f"continuous_actions_pred: {continuous_actions_pred.shape}, continuous_actions_gt: {continuous_actions_gt.shape}")
+
+                # Compute entropy of action distribution
+                entropy = -(action_probs * torch.log_softmax(action_logits, dim=-1)).sum(dim=-1).mean()
+
+                print(f"entropy: {entropy.shape}")
+
+                # SAC updates
+                # 1. Get current Q estimates and compute Q loss
+                current_q1 = q_net1(hidden_states, continuous_actions_pred)
+                current_q2 = q_net2(hidden_states, continuous_actions_pred)
+
+                # Get next action and Q values for TD target
+                with torch.no_grad():
+                    next_state_log_pi = torch.log_softmax(action_logits, dim=-1)
+                    next_state_actions = torch.tensor(
+                        action_tokenizer.decode_token_ids_to_actions(action_preds[mask].cpu().numpy())
+                    ).to(device_id)
+                    
+                    # Target Q-values
+                    target_q1 = q_net1_target(hidden_states, next_state_actions)
+                    target_q2 = q_net2_target(hidden_states, next_state_actions)
+                    target_q = torch.min(target_q1, target_q2)
+                    
+                    # Compute rewards (negative L1 loss in this case)
+                    rewards = -torch.nn.functional.l1_loss(continuous_actions_pred, continuous_actions_gt, reduction='none')
+                    
+                    # TD target
+                    target_q_value = rewards + cfg.gamma * (target_q - alpha * next_state_log_pi.mean(dim=-1))
+
+                # Q-function loss
+                q1_loss = torch.nn.functional.mse_loss(current_q1, target_q_value.detach())
+                q2_loss = torch.nn.functional.mse_loss(current_q2, target_q_value.detach())
+                q_loss = q1_loss + q2_loss
+
+                # Policy loss
+                policy_loss = (alpha * next_state_log_pi - torch.min(current_q1, current_q2)).mean()
+
+                # Optional: Update temperature parameter alpha
+                if cfg.automatic_entropy_tuning:
+                    alpha_loss = -(log_alpha * (next_state_log_pi.mean() + target_entropy).detach()).mean()
+                    alpha_optimizer.zero_grad()
+                    alpha_loss.backward()
+                    alpha_optimizer.step()
+                    alpha = log_alpha.exp()
+
+                # Total loss
+                total_loss = policy_loss + q_loss
+
+                # Update metrics
                 recent_losses.append(total_loss.item())
                 recent_action_accuracies.append(action_accuracy.item())
-                recent_rewards.append(reward.item())
-                recent_entropies.append(entropy.item())
-                recent_ppo_losses.append(policy_loss.item())
-                recent_value_losses.append(value_loss.item())
+                recent_q_losses.append(q_loss.item())
+                recent_policy_losses.append(policy_loss.item())
+                recent_entropies.append(-next_state_log_pi.mean().item())
 
-            # Backward pass
-            total_loss.backward()
+                # Backward pass and optimization
+                total_loss.backward()
 
-            # Compute smoothened train metrics
-            #   =>> Equal to current step metrics when not using gradient accumulation
-            #   =>> Otherwise, equal to the average of metrics observed over micro-batches used for gradient accumulation
-            smoothened_loss = sum(recent_losses) / len(recent_losses)
-            smoothened_action_accuracy = sum(recent_action_accuracies) / len(recent_action_accuracies)
-            smoothened_reward = sum(recent_rewards) / len(recent_rewards)
-            smoothened_entropy = sum(recent_entropies) / len(recent_entropies)
-            smoothened_ppo_loss = sum(recent_ppo_losses) / len(recent_ppo_losses)
-            smoothened_value_loss = sum(recent_value_losses) / len(recent_value_losses)
+                if (batch_idx + 1) % cfg.grad_accumulation_steps == 0:
+                    optimizer.step()
+                    q1_optimizer.step()
+                    q2_optimizer.step()
+                    
+                    optimizer.zero_grad()
+                    q1_optimizer.zero_grad()
+                    q2_optimizer.zero_grad()
 
-            # Push Metrics to W&B (every 10 gradient steps)
-            if distributed_state.is_main_process and batch_idx % 10 == 0:
-                wandb.log(
-                    {
-                        "train_loss": smoothened_loss,
-                        "action_accuracy": smoothened_action_accuracy,
-                        "reward": smoothened_reward,
-                        "entropy": smoothened_entropy,
-                        "policy_loss": smoothened_ppo_loss,
-                        "value_loss": smoothened_value_loss,
-                    },
-                    step=batch_idx,
-                )
+                    # Update target networks
+                    if batch_idx % cfg.target_update_interval == 0:
+                        for target_param, param in zip(q_net1_target.parameters(), q_net1.parameters()):
+                            target_param.data.copy_(cfg.tau * param.data + (1 - cfg.tau) * target_param.data)
+                        for target_param, param in zip(q_net2_target.parameters(), q_net2.parameters()):
+                            target_param.data.copy_(cfg.tau * param.data + (1 - cfg.tau) * target_param.data)
 
-            # Optimizer Step
-            if (batch_idx + 1) % cfg.grad_accumulation_steps == 0:
-                optimizer.step()
-                critic_optimizer.step()
-                optimizer.zero_grad()
-                critic_optimizer.zero_grad()
-                progress.update()
+                    progress.update()
 
             # Save Model Checkpoint =>> by default, only keeps the latest checkpoint, continually overwriting it!
             if batch_idx > 0 and batch_idx % cfg.save_steps == 0:
@@ -464,6 +484,26 @@ def finetune(cfg: FinetuneConfig) -> None:
             if batch_idx == cfg.max_steps:
                 print(f"Max step {cfg.max_steps} reached! Stopping training...")
                 break
+
+            # Update smoothened metrics
+            smoothened_loss = sum(recent_losses) / len(recent_losses)
+            smoothened_action_accuracy = sum(recent_action_accuracies) / len(recent_action_accuracies)
+            smoothened_q_loss = sum(recent_q_losses) / len(recent_q_losses)
+            smoothened_policy_loss = sum(recent_policy_losses) / len(recent_policy_losses)
+            smoothened_entropy = sum(recent_entropies) / len(recent_entropies)
+
+            # Push metrics to W&B
+            if distributed_state.is_main_process and batch_idx % 10 == 0:
+                wandb.log(
+                    {
+                        "total_loss": smoothened_loss,
+                        "action_accuracy": smoothened_action_accuracy,
+                        "q_loss": smoothened_q_loss,
+                        "policy_loss": smoothened_policy_loss,
+                        "entropy": smoothened_entropy,
+                    },
+                    step=batch_idx,
+                )
 
 
 if __name__ == "__main__":
