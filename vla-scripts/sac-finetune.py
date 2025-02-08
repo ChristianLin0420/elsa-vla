@@ -338,7 +338,7 @@ def finetune(cfg: FinetuneConfig) -> None:
                 # Extract hidden states and action predictions
                 hidden_states = output.hidden_states[-1][:, 0]  # Use CLS token
                 action_logits = output.logits[:, vla.module.vision_backbone.featurizer.patch_embed.num_patches : -1]
-                print(f"action_logits: {action_logits.shape}")
+                print(f"action_logits shape: {action_logits.shape}")
                 action_probs = torch.softmax(action_logits, dim=-1)
                 action_preds = action_logits.argmax(dim=2)
                 action_gt = batch["labels"][:, 1:].to(action_preds.device)
@@ -348,13 +348,13 @@ def finetune(cfg: FinetuneConfig) -> None:
                 correct_preds = (action_preds == action_gt) & mask
                 action_accuracy = correct_preds.sum().float() / mask.sum().float()
 
-                print(f"action_preds: {action_preds.shape}, action_gt: {action_gt.shape}")
+                print(f"action_preds shape: {action_preds.shape}, action_gt shape: {action_gt.shape}")
                 print(f"mask shape: {mask.shape}")
-                print(f"mask: {mask}")
+                # print(f"mask: {mask}")
                 print(f"action_preds w/o mask shape: {action_preds.shape}")
-                print(f"action_preds w/o mask: {action_preds}")
+                # print(f"action_preds w/o mask: {action_preds}")
                 print(f"action_preds w/ mask shape: {action_preds[mask].shape}")
-                print(f"action_preds w/ mask: {action_preds[mask]}")
+                # print(f"action_preds w/ mask: {action_preds[mask]}")
                 
                 # Convert discrete actions to continuous
                 continuous_actions_pred = torch.tensor(
@@ -364,20 +364,20 @@ def finetune(cfg: FinetuneConfig) -> None:
                     action_tokenizer.decode_token_ids_to_actions(action_gt[mask].cpu().numpy())
                 ).to(device_id)
 
-                print(f"continuous_actions_pred: {continuous_actions_pred.shape}")
-                print(f"continuous_actions_gt: {continuous_actions_gt.shape}")
-                print(f"continuous_actions_pred: {continuous_actions_pred}")
-                print(f"continuous_actions_gt: {continuous_actions_gt}")
+                print(f"continuous_actions_pred shape: {continuous_actions_pred.shape}")
+                print(f"continuous_actions_gt shape: {continuous_actions_gt.shape}")
+                # print(f"continuous_actions_pred: {continuous_actions_pred}")
+                # print(f"continuous_actions_gt: {continuous_actions_gt}")
 
                 # Compute entropy of action distribution
                 entropy = -(action_probs * torch.log_softmax(action_logits, dim=-1)).sum(dim=-1).mean()
 
                 print(f"entropy: {entropy.shape}")
-                print(f"entropy: {entropy}")
+                # print(f"entropy: {entropy}")
                 # SAC updates
                 # 1. Get current Q estimates and compute Q loss
-                current_q1 = q_net1(hidden_states, continuous_actions_pred)
-                current_q2 = q_net2(hidden_states, continuous_actions_pred)
+                current_q1 = q_net1(hidden_states, continuous_actions_pred.reshape(cfg.batch_size, -1))
+                current_q2 = q_net2(hidden_states, continuous_actions_pred.reshape(cfg.batch_size, -1))
 
                 # Get next action and Q values for TD target
                 with torch.no_grad():

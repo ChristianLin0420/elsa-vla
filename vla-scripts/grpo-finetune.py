@@ -296,6 +296,8 @@ def finetune(cfg: FinetuneConfig) -> None:
             # Stack all predictions and log probs
             action_preds = torch.stack(all_action_preds)  # [G, B, Seq]
             log_probs = torch.stack(all_log_probs)  # [G, B, Seq]
+            print(f"action_preds shape: {action_preds.shape}")
+            print(f"log_probs shape: {log_probs.shape}")
             
             # Get ground truth actions
             action_gt = batch["labels"][:, 1:].to(action_preds.device)
@@ -330,6 +332,7 @@ def finetune(cfg: FinetuneConfig) -> None:
                         labels=batch["labels"]
                     )
                     ref_action_logits = ref_output.logits[:, vla.module.vision_backbone.featurizer.patch_embed.num_patches : -1]
+                    print(f"ref_action_logits shape: {ref_action_logits}")
                     ref_log_probs = torch.log_softmax(ref_action_logits, dim=-1).gather(dim=2, index=action_preds.unsqueeze(-1)).squeeze(-1)
                 
                 # Compute policy ratio and clipped objective

@@ -144,8 +144,6 @@ class RLDSDataset(IterableDataset):
 
     def __iter__(self) -> Dict[str, Any]:
         for rlds_batch in self.dataset.as_numpy_iterator():
-            print(f"rlds_batch: {rlds_batch}")
-            print(f"after batch_transform: {self.batch_transform(rlds_batch)}")
             yield self.batch_transform(rlds_batch)
 
     def __len__(self) -> int:
