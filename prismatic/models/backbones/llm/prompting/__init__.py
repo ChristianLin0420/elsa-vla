@@ -1,4 +1,5 @@
 from .base_prompter import PromptBuilder, PurePromptBuilder
+from .chain_of_thought_prompter import ChainOfThoughtPromptBuilder
 from .llama2_chat_prompter import LLaMa2ChatPromptBuilder
 from .mistral_instruct_prompter import MistralInstructPromptBuilder
 from .phi_prompter import PhiPromptBuilder
