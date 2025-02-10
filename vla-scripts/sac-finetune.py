@@ -84,8 +84,9 @@ class QNetwork(torch.nn.Module):
         )
     
     def forward(self, hidden_states, actions):
-        print(f"hidden_states: {hidden_states.shape}, actions: {actions.shape}")
+        print(f"hidden_states: {type(hidden_states)}, actions: {type(actions)}")
         x = torch.cat([hidden_states, actions], dim=-1)
+        print(f"x: {x.shape}")
         return self.q_net(x)
 
 

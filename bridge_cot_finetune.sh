@@ -2,13 +2,13 @@
 #SBATCH --account=MST113264                 # (-A) iService Project ID
 #SBATCH --job-name=openvla_ppo_ft           # (-J) Job name
 #SBATCH --partition=normal                  # (-p) Slurm partition for H100 nodes
-#SBATCH --nodes=2                           # (-N) Maximum number of nodes to be allocated
+#SBATCH --nodes=1                           # (-N) Maximum number of nodes to be allocated
 #SBATCH --gpus-per-node=8                   # Gpus per node
 #SBATCH --cpus-per-task=12                  # (-c) Number of cores per MPI task
 #SBATCH --ntasks-per-node=8                 # Maximum number of tasks on each node
-#SBATCH --time=48:00:00                     # (-t) Wall time limit (days-hrs:min:sec)
-#SBATCH --output=openvla-ppo.out            # (-o) Path to the standard output file
-#SBATCH --error=openvla-ppo.err             # (-e) Path to the standard error file
+#SBATCH --time=24:00:00                     # (-t) Wall time limit (days-hrs:min:sec)
+#SBATCH --output=openvla-cot.out            # (-o) Path to the standard output file
+#SBATCH --error=openvla-cot.err             # (-e) Path to the standard error file
 #SBATCH --mail-type=END,FAIL                # Mail events (NONE, BEGIN, END, FAIL, ALL)
 #SBATCH --mail-user=crlc112358@gmail.com    # Where to send mail.  Set this to your email address
 
@@ -77,12 +77,12 @@ echo "RANK: $RANK"
 
 # Run the finetuning script
 srun torchrun \
-    --nnodes=2 \
+    --nnodes=1 \
     --nproc_per_node=8 \
     --rdzv_id=$SLURM_JOB_ID \
     --rdzv_backend=c10d \
     --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT \
-    vla-scripts/ppo-finetune.py \
+    vla-scripts/cot-finetune.py \
     --vla_path "openvla/openvla-7b" \
     --data_root_dir "/work/crlc112358/datasets/" \
     --dataset_name bridge_orig \

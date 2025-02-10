@@ -62,11 +62,8 @@ class ActionTokenizer:
                     self._bin_centers. Therefore, if i==255, we subtract 1 from it so that it just becomes the index of
                     the last bin center. We implement this simply via clipping between [0, 255 - 1].
         """
-        print(f"action_token_ids: {action_token_ids.shape}")
         discretized_actions = self.tokenizer.vocab_size - action_token_ids
-        print(f"discretized_actions: {discretized_actions.shape}")
         discretized_actions = np.clip(discretized_actions - 1, a_min=0, a_max=self.bin_centers.shape[0] - 1)
-        print(f"discretized_actions: {discretized_actions.shape}")
 
         return self.bin_centers[discretized_actions]
 
