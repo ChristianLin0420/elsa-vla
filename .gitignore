@@ -71,3 +71,6 @@ test.sh
 
 hub/
 modules
+
+# HF token
+.hf_token

@@ -318,8 +318,7 @@ def finetune(cfg: FinetuneConfig) -> None:
             rewards = torch.stack(rewards)  # [G]
             
             # Compute advantages using group computation
-            advantages = rewards - rewards.mean()
-            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+            advantages = rewards - rewards.mean() / (rewards.std() + 1e-8)
             
             # GRPO policy update
             for _ in range(cfg.grpo_iterations):
@@ -332,10 +331,11 @@ def finetune(cfg: FinetuneConfig) -> None:
                         labels=batch["labels"]
                     )
                     ref_action_logits = ref_output.logits[:, vla.module.vision_backbone.featurizer.patch_embed.num_patches : -1]
+                    ref_action_preds = ref_action_logits.argmax(dim=2)
                     print(f"ref_action_logits shape log softmax: {torch.log_softmax(ref_action_logits, dim=-1).shape}")
-                    print(f"ref_action_logits shape gather: {torch.log_softmax(ref_action_logits, dim=-1).gather(dim=2, index=action_preds.unsqueeze(-1)).shape}")
-                    print(f"ref_action_logits shape squeeze: {torch.log_softmax(ref_action_logits, dim=-1).gather(dim=2, index=action_preds.unsqueeze(-1)).squeeze(-1).shape}")
-                    ref_log_probs = torch.log_softmax(ref_action_logits, dim=-1).gather(dim=2, index=action_preds.unsqueeze(-1)).squeeze(-1)
+                    print(f"ref_action_logits shape gather: {torch.log_softmax(ref_action_logits, dim=-1).gather(dim=2, index=ref_action_preds.unsqueeze(-1)).shape}")
+                    print(f"ref_action_logits shape squeeze: {torch.log_softmax(ref_action_logits, dim=-1).gather(dim=2, index=ref_action_preds.unsqueeze(-1)).squeeze(-1).shape}")
+                    ref_log_probs = torch.log_softmax(ref_action_logits, dim=-1).gather(dim=2, index=ref_action_preds.unsqueeze(-1)).squeeze(-1)
                 
                 # Compute policy ratio and clipped objective
                 ratios = torch.exp(log_probs - ref_log_probs)  # [G, B, Seq]
