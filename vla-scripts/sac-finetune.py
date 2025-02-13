@@ -84,6 +84,7 @@ class QNetwork(torch.nn.Module):
         )
     
     def forward(self, hidden_states, actions):
+        actions = actions.reshape(hidden_states.shape[0], -1)
         print(f"hidden_states: {type(hidden_states)}, actions: {type(actions)}")
         print(f"hidden_states shape: {hidden_states.shape}, actions shape: {actions.shape}")
         x = torch.cat([hidden_states, actions], dim=-1)
@@ -404,6 +405,10 @@ def finetune(cfg: FinetuneConfig) -> None:
                     rewards = -torch.nn.functional.l1_loss(continuous_actions_pred, continuous_actions_gt, reduction='none')
                     
                     # TD target
+                    print(f"rewards shape: {rewards.shape}")
+                    print(f"target_q shape: {target_q.shape}")
+                    print(f"next_state_log_pi shape: {next_state_log_pi.shape}")
+                    print(f"next_state_log_pi mean: {next_state_log_pi.mean(dim=-1)}")
                     target_q_value = rewards + cfg.gamma * (target_q - alpha * next_state_log_pi.mean(dim=-1))
 
                 # Q-function loss

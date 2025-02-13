@@ -100,7 +100,7 @@ class FinetuneConfig:
     group_size: int = 16                                            # Number of outputs to sample per input (G in paper)
     clip_param: float = 0.2                                         # PPO clip parameter epsilon
     entropy_coef: float = 0.01                                      # Entropy coefficient for exploration
-    grpo_iterations: int = 3                                        # Number of GRPO iterations (μ in paper)
+    grpo_iterations: int = 1                                        # Number of GRPO iterations (μ in paper)
     beta: float = 0.2                                               # KL divergence coefficient (β in paper)
 
     # LoRA Arguments
@@ -296,8 +296,6 @@ def finetune(cfg: FinetuneConfig) -> None:
             # Stack all predictions and log probs
             action_preds = torch.stack(all_action_preds)  # [G, B, Seq]
             log_probs = torch.stack(all_log_probs)  # [G, B, Seq]
-            print(f"action_preds shape: {action_preds.shape}")
-            print(f"log_probs shape: {log_probs.shape}")
             
             # Get ground truth actions
             action_gt = batch["labels"][:, 1:].to(action_preds.device)
@@ -319,9 +317,13 @@ def finetune(cfg: FinetuneConfig) -> None:
             
             # Compute advantages using group computation
             advantages = rewards - rewards.mean() / (rewards.std() + 1e-8)
+            advantages = advantages.to(device_id)
             
             # GRPO policy update
-            for _ in range(cfg.grpo_iterations):
+            accumulated_loss = 0
+            for iter_idx in range(cfg.grpo_iterations):
+                optimizer.zero_grad()  # Clear gradients at start of each iteration
+                
                 # Get log probs from reference model
                 with torch.no_grad():
                     ref_output = reference_model(
@@ -332,9 +334,6 @@ def finetune(cfg: FinetuneConfig) -> None:
                     )
                     ref_action_logits = ref_output.logits[:, vla.module.vision_backbone.featurizer.patch_embed.num_patches : -1]
                     ref_action_preds = ref_action_logits.argmax(dim=2)
-                    print(f"ref_action_logits shape log softmax: {torch.log_softmax(ref_action_logits, dim=-1).shape}")
-                    print(f"ref_action_logits shape gather: {torch.log_softmax(ref_action_logits, dim=-1).gather(dim=2, index=ref_action_preds.unsqueeze(-1)).shape}")
-                    print(f"ref_action_logits shape squeeze: {torch.log_softmax(ref_action_logits, dim=-1).gather(dim=2, index=ref_action_preds.unsqueeze(-1)).squeeze(-1).shape}")
                     ref_log_probs = torch.log_softmax(ref_action_logits, dim=-1).gather(dim=2, index=ref_action_preds.unsqueeze(-1)).squeeze(-1)
                 
                 # Compute policy ratio and clipped objective
@@ -349,22 +348,25 @@ def finetune(cfg: FinetuneConfig) -> None:
                 # Compute entropy bonus
                 entropy = -(torch.softmax(action_logits, dim=-1) * torch.log_softmax(action_logits, dim=-1)).sum(dim=-1).mean()
                 
-                # Total loss
+                # Total loss for this iteration
                 total_loss = policy_loss + cfg.beta * kl_div - cfg.entropy_coef * entropy
                 
-                # Backward pass and optimization
+                # Backward pass
                 total_loss.backward()
                 
-                if (batch_idx + 1) % cfg.grad_accumulation_steps == 0:
-                    optimizer.step()
-                    optimizer.zero_grad()
+                # Optimizer step after each iteration
+                optimizer.step()
+                
+                # Store the loss for metrics
+                if iter_idx == cfg.grpo_iterations - 1:  # Store only the last iteration's loss
+                    accumulated_loss = total_loss.item()
             
             # Compute metrics for logging
             correct_preds = (action_preds == action_gt.unsqueeze(0)) & mask.unsqueeze(0)
             action_accuracy = correct_preds.sum().float() / mask.sum().float()
             
             # Store recent metrics
-            recent_losses.append(total_loss.item())
+            recent_losses.append(accumulated_loss)
             recent_action_accuracies.append(action_accuracy.item())
             recent_rewards.append(rewards.mean().item())
             recent_kl_divs.append(kl_div.item())
