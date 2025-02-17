@@ -6,7 +6,7 @@
 #SBATCH --gpus-per-node=8                   # Gpus per node
 #SBATCH --cpus-per-task=12                  # (-c) Number of cores per MPI task
 #SBATCH --ntasks-per-node=1                 # Maximum number of tasks on each node
-#SBATCH --time=24:00:00                     # (-t) Wall time limit (days-hrs:min:sec)
+#SBATCH --time=16:00:00                     # (-t) Wall time limit (days-hrs:min:sec)
 #SBATCH --output=openvla-grpo.out            # (-o) Path to the standard output file
 #SBATCH --error=openvla-grpo.err             # (-e) Path to the standard error file
 #SBATCH --mail-type=END,FAIL                # Mail events (NONE, BEGIN, END, FAIL, ALL)

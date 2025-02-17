@@ -284,10 +284,14 @@ def finetune(cfg: FinetuneConfig) -> None:
                         output_hidden_states=True
                     )
                     
+                    print(f"output.logits shape: {output.logits.shape}")
                     # Extract action logits and compute predictions
                     action_logits = output.logits[:, vla.module.vision_backbone.featurizer.patch_embed.num_patches : -1]
+                    print(f"action_logits shape: {action_logits.shape}")
                     action_preds = action_logits.argmax(dim=2)
+                    print(f"action_preds shape: {action_preds.shape}")
                     log_probs = torch.log_softmax(action_logits, dim=-1).gather(dim=2, index=action_preds.unsqueeze(-1)).squeeze(-1)
+                    print(f"log_probs shape: {log_probs.shape}")
                     
                     all_outputs.append(output)
                     all_action_preds.append(action_preds)
@@ -295,11 +299,15 @@ def finetune(cfg: FinetuneConfig) -> None:
             
             # Stack all predictions and log probs
             action_preds = torch.stack(all_action_preds)  # [G, B, Seq]
+            print(f"stacked action_preds shape: {action_preds.shape}")
             log_probs = torch.stack(all_log_probs)  # [G, B, Seq]
+            print(f"stacked log_probs shape: {log_probs.shape}")
             
             # Get ground truth actions
             action_gt = batch["labels"][:, 1:].to(action_preds.device)
+            print(f"action_gt shape: {action_gt.shape}")
             mask = action_gt > action_tokenizer.action_token_begin_idx
+            print(f"mask shape: {mask.shape}")
             
             # Compute rewards for each sampled output
             rewards = []
@@ -307,17 +315,21 @@ def finetune(cfg: FinetuneConfig) -> None:
                 continuous_actions_pred = torch.tensor(
                     action_tokenizer.decode_token_ids_to_actions(action_preds[i][mask].cpu().numpy())
                 )
+                print(f"continuous_actions_pred shape: {continuous_actions_pred.shape}")
                 continuous_actions_gt = torch.tensor(
                     action_tokenizer.decode_token_ids_to_actions(action_gt[mask].cpu().numpy())
                 )
+                print(f"continuous_actions_gt shape: {continuous_actions_gt.shape}")
                 l1_loss = torch.nn.functional.l1_loss(continuous_actions_pred, continuous_actions_gt)
                 rewards.append(-l1_loss)  # Negative L1 loss as reward
             
             rewards = torch.stack(rewards)  # [G]
+            print(f"rewards shape: {rewards.shape}")
             
             # Compute advantages using group computation
             advantages = rewards - rewards.mean() / (rewards.std() + 1e-8)
             advantages = advantages.to(device_id)
+            print(f"advantages shape: {advantages.shape}")
             
             # GRPO policy update
             accumulated_loss = 0
@@ -332,24 +344,35 @@ def finetune(cfg: FinetuneConfig) -> None:
                         pixel_values=batch["pixel_values"].to(torch.bfloat16).to(device_id),
                         labels=batch["labels"]
                     )
+                    print(f"ref_output.logits shape: {ref_output.logits.shape}")
                     ref_action_logits = ref_output.logits[:, vla.module.vision_backbone.featurizer.patch_embed.num_patches : -1]
+                    print(f"ref_action_logits shape: {ref_action_logits.shape}")
                     ref_action_preds = ref_action_logits.argmax(dim=2)
+                    print(f"ref_action_preds shape: {ref_action_preds.shape}")
                     ref_log_probs = torch.log_softmax(ref_action_logits, dim=-1).gather(dim=2, index=ref_action_preds.unsqueeze(-1)).squeeze(-1)
-                
+                    print(f"ref_log_probs shape: {ref_log_probs.shape}")
+                    
                 # Compute policy ratio and clipped objective
                 ratios = torch.exp(log_probs - ref_log_probs)  # [G, B, Seq]
+                print(f"ratios shape: {ratios.shape}")
                 surr1 = ratios * advantages.unsqueeze(-1).unsqueeze(-1)
+                print(f"surr1 shape: {surr1.shape}")
                 surr2 = torch.clamp(ratios, 1 - cfg.clip_param, 1 + cfg.clip_param) * advantages.unsqueeze(-1).unsqueeze(-1)
+                print(f"surr2 shape: {surr2.shape}")
                 policy_loss = -torch.min(surr1, surr2).mean()
+                print(f"policy_loss shape: {policy_loss.shape}")
                 
                 # Compute KL divergence loss
                 kl_div = (ref_log_probs - log_probs).mean()
+                print(f"kl_div shape: {kl_div.shape}")
                 
                 # Compute entropy bonus
                 entropy = -(torch.softmax(action_logits, dim=-1) * torch.log_softmax(action_logits, dim=-1)).sum(dim=-1).mean()
+                print(f"entropy shape: {entropy.shape}")
                 
                 # Total loss for this iteration
                 total_loss = policy_loss + cfg.beta * kl_div - cfg.entropy_coef * entropy
+                print(f"total_loss shape: {total_loss.shape}")
                 
                 # Backward pass
                 total_loss.backward()
