@@ -97,7 +97,7 @@ class FinetuneConfig:
                                                                     #   (If False, saves all checkpoints)
 
     # GRPO Arguments
-    group_size: int = 16                                            # Number of outputs to sample per input (G in paper)
+    group_size: int = 8                                             # Number of outputs to sample per input (G in paper)
     clip_param: float = 0.2                                         # PPO clip parameter epsilon
     entropy_coef: float = 0.01                                      # Entropy coefficient for exploration
     grpo_iterations: int = 1                                        # Number of GRPO iterations (μ in paper)
