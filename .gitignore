@@ -74,3 +74,6 @@ modules
 
 # HF token
 .hf_token
+
+# data
+data/
